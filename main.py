@@ -29,9 +29,13 @@ def main():
     app.setApplicationName('PX4 Flight Log Viewer')
     app.setOrganizationName('UAV Tools')
 
+    _icon_path = os.path.join(os.path.dirname(__file__), 'resources', 'app_icon.ico')
+    if os.path.isfile(_icon_path):
+        app.setWindowIcon(QIcon(_icon_path))
+
     from main_window import MainWindow
     win = MainWindow()
-    win.show()
+    win.showMaximized()
 
     # Auto-load if a file was passed on the command line
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):

@@ -9,6 +9,8 @@ VENV = r'C:\Users\AKA\OneDrive\Documents\PythonQt\PX4-Log-Viewer\.venv\Lib\site-
 QT5  = os.path.join(VENV, 'PyQt5', 'Qt5')
 
 # ── Data files to bundle ─────────────────────────────────────────────────────
+ICON = r'resources\app_icon.ico'
+
 datas = [
     ('resources/map.html', 'resources'),
 

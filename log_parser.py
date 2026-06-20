@@ -2,12 +2,14 @@
 ArduPilot / PX4 log file parser.
 Supports binary .bin (DataFlash) and text .log files.
 """
+from __future__ import annotations
 
 import os
 import math
 import bisect
 import datetime
 import zoneinfo
+from typing import Any
 
 # GPS epoch = Jan 6, 1980 00:00:00 UTC  (Unix: 315964800)
 # Current GPS–UTC leap seconds = 18
@@ -98,12 +100,19 @@ class FlightPoint:
 
 
 class FlightData:
-    def __init__(self, points=None, filename='', tz_offset_min=0, tz_name=None, events=None):
-        self.points        = points or []
-        self.filename      = filename
-        self.tz_offset_min = int(tz_offset_min)
-        self.tz_name       = tz_name or ''
-        self.events        = events or []   # [{time, type, label, time_str}]
+    def __init__(
+        self,
+        points:       list[FlightPoint] | None = None,
+        filename:     str = '',
+        tz_offset_min: int = 0,
+        tz_name:      str | None = None,
+        events:       list[dict[str, Any]] | None = None,
+    ):
+        self.points:        list[FlightPoint]  = points or []
+        self.filename:      str                = filename
+        self.tz_offset_min: int                = int(tz_offset_min)
+        self.tz_name:       str                = tz_name or ''
+        self.events:        list[dict[str, Any]] = events or []
 
     @property
     def duration(self):
@@ -165,7 +174,7 @@ def parse_file(filepath):
         points, tz_min, events = _parse_bin(filepath)
     elif ext in ('.log', '.txt'):
         points, tz_min = _parse_log_text(filepath)
-        events = []
+        events: list[dict[str, Any]] = []
     else:
         raise ValueError(f"Unsupported file type: {ext}")
 
@@ -340,7 +349,7 @@ def _parse_bin(filepath):
 
     # Convert events to relative time (vs first GPS point)
     t0 = gps_raw[0]['time'] if gps_raw else 0.0
-    events = []
+    events: list[dict[str, Any]] = []
     for ev in sorted(events_raw, key=lambda x: x['time_us']):
         t_rel = round(ev['time_us'] / 1e6 - t0, 2)
         events.append({'time': t_rel, 'type': ev['type'],

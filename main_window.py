@@ -13,9 +13,12 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QSize, pyqtSlot
 from PyQt5.QtGui import QIcon, QFont, QColor, QPalette, QFontDatabase
 
-from map_widget  import MapWidget
-from simulator   import FlightSimulator
+from map_widget     import MapWidget
+from simulator      import FlightSimulator
+from video_builder  import VideoExportWindow
 import log_parser
+from log_parser import FlightData
+from i18n import lang, tr
 
 
 # ─────────────────────────────────────────────────────────── helpers ──────────
@@ -116,6 +119,45 @@ def _make_speed_btn(label):
     return b
 
 
+# ─────────────────────────────────────────── draggable title bar widget ───────
+
+class _TitleBar(QWidget):
+    """Toolbar that also acts as the frameless window's drag handle."""
+
+    def __init__(self, main_win: 'MainWindow', parent=None):
+        super().__init__(parent)
+        self._win  = main_win
+        self._drag = None
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            if self._win.isMaximized():
+                self._drag = e.globalPos()
+            else:
+                self._drag = e.globalPos() - self._win.frameGeometry().topLeft()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if (e.buttons() & Qt.LeftButton) and self._drag is not None:
+            if self._win.isMaximized():
+                self._win.showNormal()
+                self._drag = e.globalPos() - self._win.frameGeometry().topLeft()
+            self._win.move(e.globalPos() - self._drag)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag = None
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            if self._win.isMaximized():
+                self._win.showNormal()
+            else:
+                self._win.showMaximized()
+        super().mouseDoubleClickEvent(e)
+
+
 # ─────────────────────────────────────────────────────── main window ──────────
 
 class MainWindow(QMainWindow):
@@ -189,15 +231,17 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setObjectName('root')
-        self.setWindowTitle('PX4 Flight Log Viewer')
-        self.resize(1280, 800)
+        self.setWindowTitle(tr('app_title'))
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setMinimumSize(900, 600)
         self.setStyleSheet(self._STYLE)
 
         self._sim  = FlightSimulator(self)
-        self._data = None
+        self._data: FlightData | None = None
         self._user_seeking = False
         self._current_folder = ''
+        self._video_win: VideoExportWindow | None = None
+        self._drag_pos = None          # for frameless window dragging
 
         self._build_ui()
         self._connect_signals()
@@ -245,19 +289,29 @@ class MainWindow(QMainWindow):
         ctrl = self._build_control_panel()
         root_layout.addWidget(ctrl)
 
+        # ── compact video build panel (hidden until build starts) ─────────────
+        self._compact_panel = self._build_compact_panel()
+        root_layout.addWidget(self._compact_panel)
+
         # ── status bar ────────────────────────────────────────────────────────
         self.status = QStatusBar()
         self.setStatusBar(self.status)
-        self.status.showMessage('Open an ArduPilot .bin or .log file to begin.')
+        self.status.showMessage(tr('status_ready'))
+
+        self.lbl_filename = QLabel('')
+        self.lbl_filename.setStyleSheet(
+            'color:#2a5070; font-size:11px; padding-right:6px;'
+        )
+        self.status.addPermanentWidget(self.lbl_filename)
 
     # -- toolbar ----------------------------------------------------------
 
     def _build_toolbar(self):
-        bar = QWidget()
+        bar = _TitleBar(self)
         bar.setFixedHeight(46)
         bar.setStyleSheet('background:#060e1c; border-bottom:1px solid #0e1e30;')
         h = QHBoxLayout(bar)
-        h.setContentsMargins(12, 0, 12, 0)
+        h.setContentsMargins(12, 0, 4, 0)
         h.setSpacing(8)
 
         _blue_btn = """
@@ -269,10 +323,10 @@ class MainWindow(QMainWindow):
             QPushButton:hover { background:#0055aa; color:#fff; }
         """
 
-        self.btn_open = _make_btn('📂  Open Log', 'Open ArduPilot .bin file')
+        self.btn_open = _make_btn(tr('btn_open'), tr('tip_open'))
         self.btn_open.setStyleSheet(_blue_btn)
 
-        self.btn_open_folder = _make_btn('🗁  Open Folder', 'Open folder and list .bin files')
+        self.btn_open_folder = _make_btn(tr('btn_open_folder'), tr('tip_folder'))
         self.btn_open_folder.setStyleSheet("""
             QPushButton {
                 background:#0d1e30; color:#5a90c0;
@@ -284,8 +338,9 @@ class MainWindow(QMainWindow):
         """)
         self.btn_open_folder.setCheckable(True)
 
-        self.btn_fit    = _make_btn('⊞  Fit Map', 'Fit map to flight path')
-        self.btn_center = _make_btn('⊙  Follow',  'Toggle follow drone (auto-center)', checkable=True)
+        self.btn_fit    = _make_btn(tr('btn_fit'),         tr('tip_fit'))
+        self.btn_center = _make_btn(tr('btn_follow'),      tr('tip_follow'), checkable=True)
+        self.btn_video  = _make_btn(tr('btn_build_video'), tr('tip_build_video'))
         self.btn_center.setStyleSheet("""
             QPushButton {
                 background:#0d1828; color:#7ab0e0;
@@ -299,24 +354,81 @@ class MainWindow(QMainWindow):
             QPushButton:checked:hover { background:#0055aa; color:#fff; }
         """)
 
-        title = QLabel('PX4  Flight  Log  Viewer')
-        title.setStyleSheet(
+        self.btn_video.setStyleSheet("""
+            QPushButton {
+                background:#0d1e2e; color:#6090b0;
+                border:1px solid #1a3050; border-radius:5px;
+                padding:0 14px; font-size:12px;
+            }
+            QPushButton:hover    { background:#162840; color:#90c0e0; }
+            QPushButton:disabled { color:#1e3050; border-color:#0d1828; }
+        """)
+
+        self.lbl_title = QLabel(tr('map_title'))
+        self.lbl_title.setStyleSheet(
             'color:#2a5080; font-size:13px; font-weight:600; letter-spacing:2px;'
         )
-        title.setAlignment(Qt.AlignCenter)
+        self.lbl_title.setAlignment(Qt.AlignCenter)
 
-        self.lbl_filename = QLabel('')
-        self.lbl_filename.setStyleSheet('color:#1e4060; font-size:11px;')
-        self.lbl_filename.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # Language toggle button
+        self.btn_lang = QPushButton(f'🌐 {lang.current.upper()}')
+        self.btn_lang.setFixedSize(58, 30)
+        self.btn_lang.setFont(QFont('Segoe UI', 9, QFont.Bold))
+        self.btn_lang.setToolTip('Switch language / Tilni o\'zgartirish')
+        self.btn_lang.setStyleSheet("""
+            QPushButton {
+                background:#0a1828; color:#3a6888;
+                border:1px solid #1a3555; border-radius:4px; font-size:10px;
+            }
+            QPushButton:hover { background:#122040; color:#70b0d8; }
+            QPushButton:pressed { background:#070e1c; }
+        """)
 
         h.addWidget(self.btn_open)
         h.addWidget(self.btn_open_folder)
         h.addWidget(self.btn_fit)
         h.addWidget(self.btn_center)
+        h.addWidget(self.btn_video)
         h.addStretch()
-        h.addWidget(title)
+        h.addWidget(self.lbl_title)
         h.addStretch()
-        h.addWidget(self.lbl_filename)
+        h.addWidget(self.btn_lang)
+
+        # ── Window controls: Minimize · Restore · Close ───────────────────────
+        _wc_base = (
+            'border:none; border-radius:4px;'
+            'font-size:15px; font-family:Segoe UI Symbol, sans-serif;'
+        )
+        self.btn_win_min = QPushButton('–')
+        self.btn_win_min.setFixedSize(43, 30)
+        self.btn_win_min.setToolTip('Yashirish (Minimize)')
+        self.btn_win_min.setStyleSheet(f"""
+            QPushButton {{ background:transparent; color:#3a5878; {_wc_base} }}
+            QPushButton:hover {{ background:#0d1e30; color:#88aac8; }}
+            QPushButton:pressed {{ background:#070e1c; }}
+        """)
+
+        self.btn_win_restore = QPushButton('❐')
+        self.btn_win_restore.setFixedSize(43, 30)
+        self.btn_win_restore.setToolTip('Kattalashtirish / Tiklash (Maximize / Restore)')
+        self.btn_win_restore.setStyleSheet(f"""
+            QPushButton {{ background:transparent; color:#3a5878; {_wc_base} }}
+            QPushButton:hover {{ background:#0d1e30; color:#88aac8; }}
+            QPushButton:pressed {{ background:#070e1c; }}
+        """)
+
+        self.btn_win_close = QPushButton('✕')
+        self.btn_win_close.setFixedSize(43, 30)
+        self.btn_win_close.setToolTip('Yopish (Close)')
+        self.btn_win_close.setStyleSheet(f"""
+            QPushButton {{ background:transparent; color:#3a5878; {_wc_base} }}
+            QPushButton:hover {{ background:#3a0a0a; color:#ff5555; }}
+            QPushButton:pressed {{ background:#550808; color:#ff7777; }}
+        """)
+
+        h.addWidget(self.btn_win_min)
+        h.addWidget(self.btn_win_restore)
+        h.addWidget(self.btn_win_close)
 
         return bar
 
@@ -339,7 +451,7 @@ class MainWindow(QMainWindow):
         hdr_h = QHBoxLayout(header)
         hdr_h.setContentsMargins(10, 0, 6, 0)
 
-        self.lbl_folder = QLabel('— no folder —')
+        self.lbl_folder = QLabel(tr('no_folder'))
         self.lbl_folder.setStyleSheet(
             'color:#2a5070; font-size:10px; letter-spacing:.5px;'
         )
@@ -416,23 +528,23 @@ class MainWindow(QMainWindow):
         self.btn_play.setObjectName('play-btn')
         self.btn_play.setFixedSize(46, 38)
         self.btn_play.setFont(QFont('Segoe UI', 13))
-        self.btn_play.setToolTip('Play / Pause  (Space)')
+        self.btn_play.setToolTip(tr('tip_play'))
 
         # Stop
         self.btn_stop = QPushButton('■')
         self.btn_stop.setObjectName('stop-btn')
         self.btn_stop.setFixedSize(38, 38)
         self.btn_stop.setFont(QFont('Segoe UI', 11))
-        self.btn_stop.setToolTip('Stop')
+        self.btn_stop.setToolTip(tr('tip_stop'))
 
         # Step buttons
-        self.btn_prev = _make_btn('⏮', 'Go to start', 38)
+        self.btn_prev = _make_btn('⏮', tr('tip_goto_start'), 38)
         self.btn_prev.setFixedSize(38, 38)
 
         # Speed selector
-        spd_label = QLabel('SPEED')
-        spd_label.setObjectName('section-label')
-        spd_label.setAlignment(Qt.AlignVCenter)
+        self.lbl_spd = QLabel(tr('speed_label'))
+        self.lbl_spd.setObjectName('section-label')
+        self.lbl_spd.setAlignment(Qt.AlignVCenter)
 
         self._speed_btns = {}
         self._speed_group = QButtonGroup(self)
@@ -457,7 +569,7 @@ class MainWindow(QMainWindow):
         ctrl_row.addWidget(self.btn_play)
         ctrl_row.addWidget(self.btn_stop)
         ctrl_row.addSpacing(12)
-        ctrl_row.addWidget(spd_label)
+        ctrl_row.addWidget(self.lbl_spd)
         ctrl_row.addWidget(spd_widget)
         ctrl_row.addStretch()
         ctrl_row.addWidget(self.lbl_frame)
@@ -465,11 +577,99 @@ class MainWindow(QMainWindow):
         vbox.addLayout(ctrl_row)
         return panel
 
+    def _build_compact_panel(self) -> QWidget:
+        """Thin bar shown while a video build is running (hidden otherwise)."""
+        panel = QWidget()
+        panel.setFixedHeight(38)
+        panel.setStyleSheet(
+            'background:#04080f; border-top:1px solid #0d1828;'
+        )
+        panel.hide()
+
+        row = QHBoxLayout(panel)
+        row.setContentsMargins(14, 0, 14, 0)
+        row.setSpacing(10)
+
+        self._cp_lbl = QLabel(tr('cp_building'))
+        self._cp_lbl.setStyleSheet(
+            'color:#3a6888; font-size:11px; font-family:"Segoe UI";'
+        )
+
+        self._cp_bar = QProgressBar()
+        self._cp_bar.setRange(0, 100)
+        self._cp_bar.setValue(0)
+        self._cp_bar.setTextVisible(True)
+        self._cp_bar.setFormat('%p%')
+        self._cp_bar.setFixedHeight(16)
+        self._cp_bar.setStyleSheet("""
+            QProgressBar {
+                background:#070d18; border:1px solid #1a3050;
+                border-radius:3px; color:#3a6888; font-size:10px;
+            }
+            QProgressBar::chunk {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
+                    stop:0 #003366,stop:1 #0077cc);
+                border-radius:2px;
+            }
+        """)
+
+        self._btn_cp_show = QPushButton(tr('cp_show'))
+        self._btn_cp_show.setFixedSize(62, 24)
+        self._btn_cp_show.setStyleSheet("""
+            QPushButton {
+                background:#0a1828; color:#3a6070;
+                border:1px solid #1a3050; border-radius:3px; font-size:10px;
+            }
+            QPushButton:hover { background:#122040; color:#70a0c0; }
+        """)
+
+        self._btn_cp_save = QPushButton(tr('cp_save'))
+        self._btn_cp_save.setFixedSize(80, 24)
+        self._btn_cp_save.setEnabled(False)
+        self._btn_cp_save.setStyleSheet("""
+            QPushButton {
+                background:#003366; color:#80c8ff;
+                border:1px solid #005ab0; border-radius:3px;
+                font-size:10px; font-weight:600;
+            }
+            QPushButton:hover   { background:#0055aa; color:#fff; }
+            QPushButton:disabled {
+                background:#070d18; color:#1a3050; border-color:#0d1828;
+            }
+        """)
+
+        self._btn_cp_cancel = QPushButton('✕')
+        self._btn_cp_cancel.setFixedSize(26, 24)
+        self._btn_cp_cancel.setStyleSheet("""
+            QPushButton {
+                background:transparent; color:#2a4060;
+                border:none; font-size:12px;
+            }
+            QPushButton:hover { color:#cc4444; }
+        """)
+
+        row.addWidget(self._cp_lbl)
+        row.addWidget(self._cp_bar, stretch=1)
+        row.addWidget(self._btn_cp_show)
+        row.addWidget(self._btn_cp_save)
+        row.addWidget(self._btn_cp_cancel)
+
+        return panel
+
     # ── signal wiring ───────────────────────────────────────────────────────
 
     def _connect_signals(self):
         self.btn_open.clicked.connect(self._open_file)
         self.btn_open_folder.clicked.connect(self._open_folder)
+        self.btn_video.clicked.connect(self._build_video)
+        self._btn_cp_show.clicked.connect(self._show_video_win)
+        self._btn_cp_cancel.clicked.connect(self._cancel_video_build)
+        self._btn_cp_save.clicked.connect(self._save_built_video)
+        self.btn_lang.clicked.connect(self._toggle_language)
+        lang.language_changed.connect(self._retranslate_ui)
+        self.btn_win_min.clicked.connect(self.showMinimized)
+        self.btn_win_restore.clicked.connect(self._toggle_maximize)
+        self.btn_win_close.clicked.connect(self.close)
         self.btn_fit.clicked.connect(self.map_widget.fit_all)
         self.btn_center.toggled.connect(self._on_follow_toggled)
         self.map_widget.follow_disabled.connect(self._on_follow_disabled)
@@ -495,8 +695,7 @@ class MainWindow(QMainWindow):
     def _open_file(self):
         start_dir = self._current_folder or os.path.join(os.path.dirname(__file__), 'logs')
         path, _ = QFileDialog.getOpenFileName(
-            self, 'Open ArduPilot Log', start_dir,
-            'ArduPilot Binary Logs (*.bin);;All Files (*)'
+            self, tr('dlg_open_log'), start_dir, tr('dlg_filter_bin')
         )
         if path:
             self._load_file(path)
@@ -504,7 +703,7 @@ class MainWindow(QMainWindow):
     @pyqtSlot()
     def _open_folder(self):
         start_dir = self._current_folder or os.path.join(os.path.dirname(__file__), 'logs')
-        folder = QFileDialog.getExistingDirectory(self, 'Select Log Folder', start_dir)
+        folder = QFileDialog.getExistingDirectory(self, tr('dlg_open_folder'), start_dir)
         if not folder:
             self.btn_open_folder.setChecked(False)
             return
@@ -524,18 +723,18 @@ class MainWindow(QMainWindow):
         self.btn_open_folder.setChecked(True)
 
         if not bin_files:
-            self.status.showMessage('No .bin files found in selected folder.')
+            self.status.showMessage(tr('no_bin_files'))
 
     def _on_file_selected(self, item: QListWidgetItem):
         path = os.path.join(self._current_folder, item.text())
         self._load_file(path)
 
     def _load_file(self, path: str):
-        self.status.showMessage(f'Parsing {os.path.basename(path)} …')
+        self.status.showMessage(tr('status_parsing', os.path.basename(path)))
         try:
             data = log_parser.parse_file(path)
         except Exception as e:
-            self.status.showMessage(f'Error: {e}')
+            self.status.showMessage(tr('status_error', e))
             return
         self._apply_data(data)
 
@@ -557,19 +756,24 @@ class MainWindow(QMainWindow):
             self.lbl_total.setText('--:--:--')
 
         self.lbl_frame.setText(f'1 / {n}')
-        self.lbl_filename.setText(data.filename)
+        self.lbl_filename.setText(str(data.filename))
         self._set_controls_enabled(True)
 
         utc_info = ''
         if data.start_utc:
             local_start = data.start_utc.astimezone(data.tz)
-            utc_info = (f'  |  Start {local_start.strftime("%Y-%m-%d %H:%M:%S")}'
-                        f' {data.tz_label}  (BRD_RTC_TZ_MIN={data.tz_offset_min})')
+            utc_info = tr('status_utc_info',
+                          dt=local_start.strftime('%Y-%m-%d %H:%M:%S'),
+                          tz=data.tz_label,
+                          off=data.tz_offset_min)
         dist_km = data.total_distance / 1000
         self.status.showMessage(
-            f'Loaded {n} GPS points  |  Duration {fmt_time(data.duration)}'
-            f'  |  Distance {dist_km:.2f} km'
-            f'  |  Max alt {data.max_alt:.0f} m  |  Max speed {data.max_spd * 3.6:.1f} km/h'
+            tr('status_loaded',
+               n=n,
+               dur=fmt_time(data.duration),
+               dist=f'{dist_km:.2f}',
+               alt=f'{data.max_alt:.0f}',
+               spd=f'{data.max_spd * 3.6:.1f}')
             + utc_info
         )
 
@@ -582,6 +786,75 @@ class MainWindow(QMainWindow):
         self.btn_center.blockSignals(True)
         self.btn_center.setChecked(False)
         self.btn_center.blockSignals(False)
+
+    @pyqtSlot()
+    def _build_video(self):
+        data = self._data
+        if data is None:
+            return
+        # If a build is already running, just show that window
+        if self._video_win is not None and self._video_win.isVisible():
+            self._video_win.show_or_raise()
+            return
+        win = VideoExportWindow()
+        win.sig_frame.connect(self._on_video_frame)
+        win.sig_done.connect(self._on_video_done)
+        win.sig_cancel.connect(self._on_video_end)
+        win.sig_failed.connect(self._on_video_end)
+        self._video_win = win
+        # Disable playback and Build Video button while building
+        self._sim.stop()
+        self._set_controls_enabled(False)
+        self.btn_video.setEnabled(False)
+        # Show compact panel
+        self._cp_bar.setValue(0)
+        self._cp_lbl.setText(tr('cp_building'))
+        self._cp_lbl.setStyleSheet('color:#3a6888; font-size:11px; font-family:"Segoe UI";')
+        self._btn_cp_save.setEnabled(False)
+        self._compact_panel.show()
+        win.start_build(self.map_widget, data)
+
+    @pyqtSlot(int, int)
+    def _on_video_frame(self, cur: int, total: int):
+        pct = int(cur / total * 100) if total > 0 else 0
+        self._cp_bar.setValue(pct)
+        self._cp_lbl.setText(tr('cp_building_n', cur=cur, total=total))
+
+    @pyqtSlot(str)
+    def _on_video_done(self, _path: str):
+        self._cp_bar.setValue(100)
+        self._cp_lbl.setText(tr('cp_done'))
+        self._cp_lbl.setStyleSheet('color:#00cc88; font-size:11px; font-weight:bold;')
+        self._btn_cp_save.setEnabled(True)
+        # Re-enable app controls
+        if self._data is not None:
+            self._set_controls_enabled(True)
+        self.btn_video.setEnabled(self._data is not None)
+
+    @pyqtSlot()
+    def _on_video_end(self):
+        """Called on cancel or save-complete."""
+        self._compact_panel.hide()
+        self._btn_cp_save.setEnabled(False)
+        self._video_win = None
+        if self._data is not None:
+            self._set_controls_enabled(True)
+        self.btn_video.setEnabled(self._data is not None)
+
+    @pyqtSlot()
+    def _show_video_win(self):
+        if self._video_win is not None:
+            self._video_win.show_or_raise()
+
+    @pyqtSlot()
+    def _cancel_video_build(self):
+        if self._video_win is not None:
+            self._video_win.cancel_build()
+
+    @pyqtSlot()
+    def _save_built_video(self):
+        if self._video_win is not None:
+            self._video_win._save_video()
 
     @pyqtSlot()
     def _toggle_play(self):
@@ -611,14 +884,14 @@ class MainWindow(QMainWindow):
     def _on_state_changed(self, state):
         if state == 'playing':
             self.btn_play.setText('⏸')
-            self.btn_play.setToolTip('Pause')
+            self.btn_play.setToolTip(tr('tip_stop'))
         else:
             self.btn_play.setText('▶')
-            self.btn_play.setToolTip('Play')
+            self.btn_play.setToolTip(tr('tip_play'))
 
     @pyqtSlot()
     def _on_finished(self):
-        self.status.showMessage('Playback complete.')
+        self.status.showMessage(tr('status_done'))
 
     @pyqtSlot()
     def _slider_pressed(self):
@@ -636,9 +909,84 @@ class MainWindow(QMainWindow):
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
+    @pyqtSlot()
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+            from PyQt5.QtWidgets import QApplication
+            scr = QApplication.primaryScreen()
+            if scr is not None:
+                avail = scr.availableGeometry()
+                w = int(avail.width()  * 0.80)
+                h = int(avail.height() * 0.80)
+                x = avail.x() + (avail.width()  - w) // 2
+                y = avail.y() + (avail.height() - h) // 2
+                self.setGeometry(x, y, w, h)
+        else:
+            self.showMaximized()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        from PyQt5.QtCore import QEvent
+        from PyQt5.QtWidgets import QApplication
+        if event.type() == QEvent.WindowStateChange:
+            if self.isMaximized():
+                # Frameless windows on Windows can overflow behind the taskbar;
+                # clamp to the available work area explicitly.
+                scr = QApplication.primaryScreen()
+                if scr is not None:
+                    self.setGeometry(scr.availableGeometry())
+                self.btn_win_restore.setText('❒')
+                self.btn_win_restore.setToolTip('Tiklash (Restore)')
+            else:
+                self.btn_win_restore.setText('❐')
+                self.btn_win_restore.setToolTip('Kattalashtirish (Maximize)')
+
+    def _toggle_language(self):
+        lang.toggle()
+
+    @pyqtSlot(str)
+    def _retranslate_ui(self, _code: str = ''):
+        self.setWindowTitle(tr('app_title'))
+        self.lbl_title.setText(tr('map_title'))
+        self.btn_lang.setText(f'🌐 {lang.current.upper()}')
+        # Toolbar
+        self.btn_open.setText(tr('btn_open'))
+        self.btn_open.setToolTip(tr('tip_open'))
+        self.btn_open_folder.setText(tr('btn_open_folder'))
+        self.btn_open_folder.setToolTip(tr('tip_folder'))
+        self.btn_fit.setText(tr('btn_fit'))
+        self.btn_fit.setToolTip(tr('tip_fit'))
+        self.btn_center.setText(tr('btn_follow'))
+        self.btn_center.setToolTip(tr('tip_follow'))
+        self.btn_video.setText(tr('btn_build_video'))
+        self.btn_video.setToolTip(tr('tip_build_video'))
+        # File panel
+        if not self._current_folder:
+            self.lbl_folder.setText(tr('no_folder'))
+        # Control panel
+        self.lbl_spd.setText(tr('speed_label'))
+        self.btn_play.setToolTip(tr('tip_play'))
+        self.btn_stop.setToolTip(tr('tip_stop'))
+        self.btn_prev.setToolTip(tr('tip_goto_start'))
+        # Compact video panel buttons
+        self._btn_cp_show.setText(tr('cp_show'))
+        self._btn_cp_save.setText(tr('cp_save'))
+        # Compact label — update only if in "building" state (not done)
+        if not self._btn_cp_save.isEnabled():
+            self._cp_lbl.setText(tr('cp_building'))
+        else:
+            self._cp_lbl.setText(tr('cp_done'))
+        # Status bar — update if no file loaded yet
+        if self._data is None:
+            self.status.showMessage(tr('status_ready'))
+        # Video export window — refresh if open
+        if self._video_win is not None:
+            self._video_win.retranslate()
+
     def _set_controls_enabled(self, enabled):
         for w in (self.btn_play, self.btn_stop, self.btn_prev,
-                  self.slider, self.btn_fit, self.btn_center):
+                  self.slider, self.btn_fit, self.btn_center, self.btn_video):
             w.setEnabled(enabled)
         for b in self._speed_btns.values():
             b.setEnabled(enabled)
