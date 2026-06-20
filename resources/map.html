@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PX4 Flight Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#0a0a0f; overflow:hidden; }
+#map { width:100vw; height:100vh; }
+
+.leaflet-control-zoom { border:none !important; box-shadow:0 2px 12px rgba(0,0,0,.5) !important; }
+.leaflet-control-zoom a { background:rgba(15,20,30,.85) !important; color:#aac8ff !important; border-color:rgba(100,160,255,.25) !important; }
+.leaflet-control-zoom a:hover { background:rgba(30,60,120,.9) !important; color:#fff !important; }
+
+/* ── Telemetry ──────────────────────────────────────────────────── */
+#info-overlay {
+  position:fixed; top:12px; right:12px;
+  background:rgba(8,12,24,.88);
+  backdrop-filter:blur(8px);
+  border:1px solid rgba(80,160,255,.25);
+  border-radius:10px;
+  padding:10px 14px;
+  color:#c8deff;
+  font-family:'Segoe UI',monospace;
+  font-size:12px;
+  min-width:226px;
+  display:none;
+  box-shadow:0 4px 20px rgba(0,0,0,.45);
+  z-index:1000;
+}
+#info-overlay .panel-title {
+  font-size:11px; color:#5090e0;
+  text-transform:uppercase; letter-spacing:1px;
+  margin-bottom:8px; font-weight:600;
+  display:flex; justify-content:space-between; align-items:center;
+}
+#info-overlay .row {
+  display:flex; justify-content:space-between;
+  align-items:center; margin-bottom:4px; gap:8px;
+}
+.lbl  { color:#6090c0; font-size:11px; min-width:56px; }
+.val  { color:#e0f0ff; font-weight:500; font-size:12px; flex:1; }
+.copy-btn {
+  background:none; border:1px solid rgba(80,160,255,.2);
+  border-radius:4px; color:#4070a0; font-size:10px;
+  padding:1px 5px; cursor:pointer; line-height:1.4;
+  transition:all .15s;
+}
+.copy-btn:hover  { background:rgba(40,100,200,.3); color:#aad0ff; border-color:#4080c0; }
+.copy-btn.copied { color:#00dd88; border-color:#00aa60; }
+
+.divider { border:none; border-top:1px solid rgba(80,160,255,.1); margin:6px 0; }
+
+/* ── RC Input sticks ─────────────────────────────────────────────── */
+#rc-overlay {
+  position:fixed; bottom:14px; left:14px;
+  background:rgba(8,12,24,.88);
+  backdrop-filter:blur(8px);
+  border:1px solid rgba(80,160,255,.2);
+  border-radius:10px;
+  padding:8px 12px 10px;
+  display:none;
+  z-index:1000;
+  box-shadow:0 4px 20px rgba(0,0,0,.4);
+  font-family:'Segoe UI',monospace;
+  user-select:none;
+}
+.rc-title {
+  font-size:10px; color:#5090e0;
+  text-transform:uppercase; letter-spacing:1px;
+  margin-bottom:6px; font-weight:600;
+}
+.sticks-row { display:flex; gap:10px; }
+.stick-wrap { display:flex; flex-direction:column; align-items:center; gap:4px; }
+.stick-label { font-size:9px; color:#4070a0; letter-spacing:.5px; }
+.stick-box {
+  width:64px; height:64px;
+  background:rgba(10,20,40,.7);
+  border:1px solid rgba(60,120,200,.3);
+  border-radius:6px;
+  position:relative;
+  overflow:hidden;
+}
+/* crosshair lines */
+.stick-box::before, .stick-box::after {
+  content:''; position:absolute;
+  background:rgba(60,120,200,.15);
+}
+.stick-box::before { width:1px; height:100%; left:50%; }
+.stick-box::after  { height:1px; width:100%; top:50%; }
+.stick-dot {
+  width:12px; height:12px;
+  background:#00aaff;
+  border-radius:50%;
+  border:2px solid rgba(255,255,255,.6);
+  position:absolute;
+  transform:translate(-50%,-50%);
+  left:50%; top:50%;
+  box-shadow:0 0 6px rgba(0,170,255,.7);
+  transition:left .08s,top .08s;
+}
+.stick-vals {
+  font-size:9px; color:#3a6080;
+  display:flex; flex-direction:column;
+  align-items:center; gap:1px; line-height:1.3;
+}
+
+/* ── RCOUT motor bars ────────────────────────────────────────────── */
+#rcout-overlay {
+  position:fixed; bottom:14px; left:192px;
+  background:rgba(8,12,24,.88);
+  backdrop-filter:blur(8px);
+  border:1px solid rgba(80,160,255,.2);
+  border-radius:10px;
+  padding:8px 12px 10px;
+  display:none;
+  z-index:1000;
+  box-shadow:0 4px 20px rgba(0,0,0,.4);
+  font-family:'Segoe UI',monospace;
+  user-select:none;
+}
+.motors-title {
+  font-size:10px; color:#5090e0;
+  text-transform:uppercase; letter-spacing:1px;
+  margin-bottom:6px; font-weight:600;
+}
+.motors-row { display:flex; gap:8px; align-items:flex-end; }
+.motor-wrap { display:flex; flex-direction:column; align-items:center; gap:3px; }
+.motor-bar-bg {
+  width:18px; height:64px;
+  background:rgba(10,20,40,.7);
+  border:1px solid rgba(60,120,200,.3);
+  border-radius:4px;
+  position:relative;
+  overflow:hidden;
+  display:flex; align-items:flex-end;
+}
+.motor-bar-fill {
+  width:100%;
+  background:linear-gradient(to top, #0055aa, #00aaff);
+  border-radius:3px;
+  transition:height .08s;
+  min-height:2px;
+}
+.motor-label { font-size:9px; color:#3a6080; }
+.motor-val   { font-size:9px; color:#4080a0; }
+
+/* ── Progress ───────────────────────────────────────────────────── */
+#progress-overlay {
+  position:fixed; bottom:14px; right:14px;
+  background:rgba(8,12,24,.75);
+  border:1px solid rgba(80,160,255,.2);
+  border-radius:8px; padding:6px 12px;
+  color:#4080c0; font-family:monospace;
+  font-size:11px; display:none; z-index:1000;
+}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<!-- ── Telemetry overlay ───────────────────────────────────────── -->
+<div id="info-overlay">
+  <div class="panel-title">
+    <span>&#9992; Flight Telemetry</span>
+    <button class="copy-btn" id="copy-both-btn" onclick="copyBoth()" title="Copy lat, lng">⎘ COPY</button>
+  </div>
+
+  <div class="row">
+    <span class="lbl">LAT</span>
+    <span class="val" id="v-lat">—</span>
+  </div>
+  <div class="row">
+    <span class="lbl">LNG</span>
+    <span class="val" id="v-lng">—</span>
+  </div>
+
+  <hr class="divider">
+
+  <div class="row">
+    <span class="lbl">ALT REL</span>
+    <span class="val" id="v-alt">—</span>
+  </div>
+  <div class="row">
+    <span class="lbl">SPEED</span>
+    <span class="val" id="v-spd">—</span>
+  </div>
+  <div class="row">
+    <span class="lbl">HEADING</span>
+    <span class="val" id="v-hdg">—</span>
+  </div>
+  <div class="row">
+    <span class="lbl">TIME</span>
+    <span class="val" id="v-time">—</span>
+  </div>
+
+  <hr class="divider">
+
+  <div class="row">
+    <span class="lbl">DIST</span>
+    <span class="val" id="v-dist">—</span>
+  </div>
+  <div class="row">
+    <span class="lbl">BATTERY</span>
+    <span class="val" id="v-bat">—</span>
+  </div>
+
+  <hr class="divider">
+
+  <div class="row">
+    <span class="lbl">FLY TIME</span>
+    <span class="val" id="v-flytime" style="font-size:11px;">—</span>
+  </div>
+  <div class="row" style="margin-top:-2px;">
+    <span class="lbl"></span>
+    <span class="val" id="v-duration" style="color:#3a6090; font-size:11px;">—</span>
+  </div>
+
+  <hr class="divider">
+
+  <div class="row" style="margin-bottom:4px;">
+    <span class="lbl">MODE</span>
+    <span class="val" id="v-mode" style="color:#00cc88; font-weight:600;">—</span>
+  </div>
+  <div style="font-size:9px; color:#2a4a60; letter-spacing:.8px; margin-bottom:3px; text-transform:uppercase;">Events</div>
+  <div id="v-events" style="max-height:90px; overflow-y:auto; font-size:10px;
+    line-height:1.7; color:#3a6080; scrollbar-width:thin;"></div>
+</div>
+
+<!-- ── RC Input sticks ─────────────────────────────────────────── -->
+<div id="rc-overlay">
+  <div class="rc-title">RC Input</div>
+  <div class="sticks-row">
+    <!-- Left stick: Throttle (Y) + Yaw (X) -->
+    <div class="stick-wrap">
+      <div class="stick-label">LEFT STICK</div>
+      <div class="stick-box">
+        <div class="stick-dot" id="dot-L"></div>
+      </div>
+      <div class="stick-vals">
+        <span id="rc-thr-val">THR: —</span>
+        <span id="rc-yaw-val">YAW: —</span>
+      </div>
+    </div>
+    <!-- Right stick: Pitch (Y) + Roll (X) -->
+    <div class="stick-wrap">
+      <div class="stick-label">RIGHT STICK</div>
+      <div class="stick-box">
+        <div class="stick-dot" id="dot-R"></div>
+      </div>
+      <div class="stick-vals">
+        <span id="rc-ptch-val">PCH: —</span>
+        <span id="rc-roll-val">ROL: —</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── RCOUT motor bars ────────────────────────────────────────── -->
+<div id="rcout-overlay">
+  <div class="motors-title">RC Output (Motors)</div>
+  <div class="motors-row" id="motors-row">
+    <!-- filled dynamically -->
+  </div>
+</div>
+
+<!-- ── Progress ───────────────────────────────────────────────── -->
+<div id="progress-overlay">
+  <span id="v-progress">0 / 0</span>
+</div>
+
+<script>
+/* ── Map init ────────────────────────────────────────────────────── */
+var map = L.map('map', { zoomControl:true, attributionControl:false }).setView([41.3, 69.2], 14);
+
+L.tileLayer('https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
+  maxZoom: 21, subdomains:'0123', tileSize:256
+}).addTo(map);
+
+var followMode = false;
+function setFollowMode(v) { followMode = v; }
+
+// Xaritaga bosilsa / sürüklansa — follow o'chadi
+map.on('dragstart', function() {
+  if (followMode) {
+    followMode = false;
+    console.log('__follow__:disabled');
+  }
+});
+
+/* ── Layers / markers ────────────────────────────────────────────── */
+var allPoints     = [];
+var fullPathLayer  = null;
+var donePathLayer  = null;
+var droneMarker    = null;
+var takeoffMarker  = null;
+var landMarker     = null;
+var homeAlt        = 0;
+var flightEvents   = [];   // [{time, type, label, time_str}]
+
+var STICK_SIZE = 64;  // px, matches .stick-box
+
+function makeDroneIcon(heading) {
+  var svg =
+    '<svg viewBox="0 0 44 44" width="42" height="42" xmlns="http://www.w3.org/2000/svg">' +
+    // Arms
+    '<line x1="22" y1="22" x2="8"  y2="8"  stroke="#0f2d4a" stroke-width="3" stroke-linecap="round"/>' +
+    '<line x1="22" y1="22" x2="36" y2="8"  stroke="#0f2d4a" stroke-width="3" stroke-linecap="round"/>' +
+    '<line x1="22" y1="22" x2="8"  y2="36" stroke="#0f2d4a" stroke-width="3" stroke-linecap="round"/>' +
+    '<line x1="22" y1="22" x2="36" y2="36" stroke="#0f2d4a" stroke-width="3" stroke-linecap="round"/>' +
+    // Rear propellers — very dark navy
+    '<circle cx="8"  cy="36" r="6.5" stroke="#1a3555" stroke-width="1.5" fill="rgba(10,28,55,0.9)"/>' +
+    '<circle cx="36" cy="36" r="6.5" stroke="#1a3555" stroke-width="1.5" fill="rgba(10,28,55,0.9)"/>' +
+    // Front propellers — dark teal/green (heading side)
+    '<circle cx="8"  cy="8"  r="6.5" stroke="#0d3d2a" stroke-width="1.5" fill="rgba(8,35,22,0.9)"/>' +
+    '<circle cx="36" cy="8"  r="6.5" stroke="#0d3d2a" stroke-width="1.5" fill="rgba(8,35,22,0.9)"/>' +
+    // Center body
+    '<circle cx="22" cy="22" r="5.5" fill="#080f1a" stroke="#153355" stroke-width="1.5"/>' +
+    '<circle cx="22" cy="22" r="2.5" fill="#1a5080"/>' +
+    // Forward heading arrow — dark green
+    '<polygon points="22,3 18.5,10 25.5,10" fill="#0a5530" opacity="0.95"/>' +
+    '</svg>';
+
+  return L.divIcon({
+    className: '',
+    html: '<div style="width:42px;height:42px;transform:rotate(' + (heading||0) + 'deg);' +
+          'filter:drop-shadow(0 0 5px rgba(0,120,200,.7));">' + svg + '</div>',
+    iconSize:[42,42], iconAnchor:[21,21]
+  });
+}
+
+var takeoffIcon = L.divIcon({
+  className:'',
+  html:'<div style="background:#00dd44;color:#fff;padding:3px 7px;border-radius:5px;' +
+       'font-size:11px;font-family:Arial;font-weight:bold;white-space:nowrap;' +
+       'box-shadow:0 2px 8px rgba(0,200,60,.5);">T</div>',
+  iconAnchor:[8,10]
+});
+var landIcon = L.divIcon({
+  className:'',
+  html:'<div style="background:#ff3344;color:#fff;padding:3px 7px;border-radius:5px;' +
+       'font-size:11px;font-family:Arial;font-weight:bold;white-space:nowrap;' +
+       'box-shadow:0 2px 8px rgba(255,50,60,.5);">L</div>',
+  iconAnchor:[8,10]
+});
+
+/* ── Motor bars init ─────────────────────────────────────────────── */
+var motorFills = [];
+
+function initMotorBars(n) {
+  var row = document.getElementById('motors-row');
+  row.innerHTML = '';
+  motorFills = [];
+  for (var i = 0; i < n; i++) {
+    var w = document.createElement('div');
+    w.className = 'motor-wrap';
+    var bg = document.createElement('div');
+    bg.className = 'motor-bar-bg';
+    var fill = document.createElement('div');
+    fill.className = 'motor-bar-fill';
+    fill.style.height = '0%';
+    bg.appendChild(fill);
+    motorFills.push(fill);
+    var lbl = document.createElement('div');
+    lbl.className = 'motor-label';
+    lbl.textContent = 'M' + (i+1);
+    var val = document.createElement('div');
+    val.className = 'motor-val';
+    val.id = 'mo-' + i;
+    val.textContent = '—';
+    w.appendChild(bg); w.appendChild(lbl); w.appendChild(val);
+    row.appendChild(w);
+  }
+}
+
+/* ── Public API (called from Python via runJavaScript) ──────────── */
+
+function setFlightData(points) {
+  allPoints = points;
+  homeAlt = (points && points.length > 0) ? points[0].alt : 0;
+  [fullPathLayer, donePathLayer, droneMarker, takeoffMarker, landMarker].forEach(function(l){
+    if (l) map.removeLayer(l);
+  });
+  if (!points || points.length === 0) return;
+
+  var ll = points.map(function(p){ return [p.lat, p.lng]; });
+
+  // Full 2D path — gray dashed
+  fullPathLayer = L.polyline(ll, { color:'#445566', weight:2, opacity:.6, dashArray:'6 5' }).addTo(map);
+
+  // Traveled 2D path — cyan
+  donePathLayer = L.polyline([], { color:'#00aaff', weight:3, opacity:.95 }).addTo(map);
+
+  takeoffMarker = L.marker(ll[0], { icon:takeoffIcon, zIndexOffset:500 })
+    .addTo(map).bindTooltip('Takeoff');
+  landMarker = L.marker(ll[ll.length-1], { icon:landIcon, zIndexOffset:500 })
+    .addTo(map).bindTooltip('Landing');
+  droneMarker = L.marker(ll[0], { icon:makeDroneIcon(0), zIndexOffset:2000 }).addTo(map);
+
+  map.fitBounds(fullPathLayer.getBounds(), { padding:[50,50] });
+
+  // FLY TIME
+  var first = points[0];
+  var last  = points[points.length - 1];
+  var tStart = first.gps_time_str || '--:--:--';
+  var tEnd   = last.gps_time_str  || '--:--:--';
+  document.getElementById('v-flytime').textContent = tStart + ' — ' + tEnd;
+  var durSec = Math.round(last.time - first.time);
+  var dh = Math.floor(durSec / 3600);
+  var dm = Math.floor((durSec % 3600) / 60);
+  var ds = durSec % 60;
+  var durStr = (dh ? pad(dh) + ':' : '') + pad(dm) + ':' + pad(ds);
+  document.getElementById('v-duration').textContent = durStr;
+
+  // Determine motor count from first point with rcout
+  var firstPt = points[0];
+  var nMotors = 0;
+  if (firstPt.rcout) nMotors = firstPt.rcout.length;
+  if (nMotors > 0) initMotorBars(nMotors);
+
+  // Show all overlays
+  ['info-overlay','rc-overlay','progress-overlay'].forEach(function(id){
+    document.getElementById(id).style.display = 'block';
+  });
+  if (nMotors > 0) document.getElementById('rcout-overlay').style.display = 'block';
+  document.getElementById('v-progress').textContent = '1 / ' + points.length;
+}
+
+function updateFrame(index) {
+  if (!allPoints || index < 0 || index >= allPoints.length) return;
+  var pt = allPoints[index];
+
+  // Drone marker
+  if (droneMarker) {
+    droneMarker.setLatLng([pt.lat, pt.lng]);
+    droneMarker.setIcon(makeDroneIcon(pt.heading || 0));
+  }
+
+  // Follow mode — xaritani drone bilan birga siljit
+  if (followMode) {
+    map.setView([pt.lat, pt.lng], map.getZoom(), { animate:false });
+  }
+
+  // 2D traveled path
+  if (donePathLayer) {
+    donePathLayer.setLatLngs(allPoints.slice(0, index+1).map(function(p){ return [p.lat, p.lng]; }));
+  }
+
+  // Telemetry text
+  var latStr = pt.lat.toFixed(6);
+  var lngStr = pt.lng.toFixed(6);
+  document.getElementById('v-lat').textContent  = latStr + '°';
+  document.getElementById('v-lng').textContent  = lngStr + '°';
+  document.getElementById('v-alt').textContent  = Math.max(0, pt.alt - homeAlt).toFixed(1) + ' m';
+  document.getElementById('v-spd').textContent  = ((pt.spd||0) * 3.6).toFixed(1) + ' km/h';
+  document.getElementById('v-hdg').textContent  = (pt.heading||0).toFixed(0) + '°';
+  document.getElementById('v-time').textContent = pt.gps_time_str || pad(Math.floor(Math.round(pt.time)/60)) + ':' + pad(Math.round(pt.time)%60);
+
+  // Distance traveled
+  if (pt.dist !== undefined) {
+    var d = pt.dist;
+    document.getElementById('v-dist').textContent =
+      d >= 1000 ? (d / 1000).toFixed(2) + ' km' : d.toFixed(0) + ' m';
+  }
+
+  // Battery
+  if (pt.bat_volt && pt.bat_volt > 0) {
+    document.getElementById('v-bat').textContent = pt.bat_volt.toFixed(1) + ' V  |  ' + pt.bat_pct + '%';
+    var batColor = pt.bat_pct > 50 ? '#00cc88' : pt.bat_pct > 20 ? '#ffaa00' : '#ff4444';
+    document.getElementById('v-bat').style.color = batColor;
+  }
+
+  // Events: find active mode + past events list
+  var curMode = '—';
+  var lines   = [];
+  for (var i = 0; i < flightEvents.length; i++) {
+    var ev = flightEvents[i];
+    if (ev.time > pt.time) break;
+    var ts = ev.time_str || '';
+    var icon  = ev.type === 'MODE' ? '◆'
+              : ev.type === 'GPS'  ? '◉'
+              : ev.type === 'RC'   ? '⚡'
+              : '●';
+    var color = ev.type === 'MODE' ? '#2a7a9a'
+              : ev.type === 'GPS'  ? '#7a5a20'
+              : ev.type === 'RC'   ? '#8a3a20'
+              : '#5a7a50';
+    lines.push('<span style="color:' + color + '">' + icon + '</span> '
+      + '<span style="color:#2a5060">' + ts + '</span>  '
+      + '<span style="color:#4a8aaa">' + ev.label + '</span>');
+    if (ev.type === 'MODE') curMode = ev.label;
+  }
+  document.getElementById('v-mode').textContent = curMode;
+  var evEl = document.getElementById('v-events');
+  evEl.innerHTML = lines.join('<br>');
+  // auto-scroll to bottom to show latest event
+  evEl.scrollTop = evEl.scrollHeight;
+
+  // RC Input sticks
+  updateSticks(pt.rc_roll, pt.rc_pitch, pt.rc_throttle, pt.rc_yaw);
+
+  // RCOUT motors
+  if (pt.rcout && pt.rcout.length > 0) updateMotors(pt.rcout);
+
+  document.getElementById('v-progress').textContent = (index+1) + ' / ' + allPoints.length;
+}
+
+/* ── Events ──────────────────────────────────────────────────────── */
+function setFlightEvents(events) {
+  flightEvents = (events || []).slice().sort(function(a,b){ return a.time - b.time; });
+}
+
+/* ── RC sticks ───────────────────────────────────────────────────── */
+function updateSticks(roll, pitch, throttle, yaw) {
+  // Normalize -1..1 (center=1500, min=1000, max=2000)
+  var rollN  = clamp((roll  - 1500) / 500, -1, 1);
+  var pitchN = clamp((pitch - 1500) / 500, -1, 1);  // forward = negative
+  var yawN   = clamp((yaw   - 1500) / 500, -1, 1);
+  // Throttle: 1000=bottom 2000=top → 0..1, then map to -1..1 for dot Y
+  var thrN   = clamp((throttle - 1000) / 1000, 0, 1);  // 0=bottom 1=top
+
+  var half = STICK_SIZE / 2;
+  var r = half - 8;  // max dot travel radius
+
+  // Left stick: X=yaw, Y=throttle (throttle doesn't spring to center)
+  moveDot('dot-L', half + yawN * r, half - (thrN * 2 - 1) * r);
+
+  // Right stick: X=roll, Y=pitch (inverted: pull back = positive pitch)
+  moveDot('dot-R', half + rollN * r, half + pitchN * r);
+
+  document.getElementById('rc-thr-val').textContent  = 'THR: ' + throttle;
+  document.getElementById('rc-yaw-val').textContent  = 'YAW: ' + yaw;
+  document.getElementById('rc-ptch-val').textContent = 'PCH: ' + pitch;
+  document.getElementById('rc-roll-val').textContent = 'ROL: ' + roll;
+}
+
+function moveDot(id, x, y) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.style.left = x + 'px';
+  el.style.top  = y + 'px';
+}
+
+/* ── RCOUT motor bars ────────────────────────────────────────────── */
+function updateMotors(rcout) {
+  for (var i = 0; i < rcout.length && i < motorFills.length; i++) {
+    var pwm = rcout[i];
+    var pct = clamp((pwm - 1000) / 1000 * 100, 0, 100);
+    motorFills[i].style.height = pct + '%';
+    var el = document.getElementById('mo-' + i);
+    if (el) el.textContent = pwm;
+  }
+}
+
+/* ── Copy helpers ────────────────────────────────────────────────── */
+function copyVal(id) {
+  var btn  = event.target;
+  var text = document.getElementById(id).textContent.replace('°','').trim();
+  _doClip(text, btn);
+}
+
+function copyBoth() {
+  var lat  = document.getElementById('v-lat').textContent.replace('°','').trim();
+  var lng  = document.getElementById('v-lng').textContent.replace('°','').trim();
+  _doClip(lat + ', ' + lng, document.getElementById('copy-both-btn'));
+}
+
+function _doClip(text, btn) {
+  var ok = function() {
+    if (!btn) return;
+    var orig = btn.textContent;
+    btn.classList.add('copied');
+    btn.textContent = '✓';
+    setTimeout(function(){ btn.classList.remove('copied'); btn.textContent = orig; }, 1200);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(ok).catch(function(){
+      _fallbackCopy(text); ok();
+    });
+  } else {
+    _fallbackCopy(text); ok();
+  }
+}
+
+function _fallbackCopy(text) {
+  var el = document.createElement('textarea');
+  el.value = text; el.style.position = 'fixed'; el.style.opacity = '0';
+  document.body.appendChild(el); el.select();
+  try { document.execCommand('copy'); } catch(e){}
+  document.body.removeChild(el);
+}
+
+/* ── Map helpers ─────────────────────────────────────────────────── */
+function centerOnDrone() {
+  if (droneMarker) map.panTo(droneMarker.getLatLng(), { animate:true, duration:.3 });
+}
+function fitAll() {
+  if (fullPathLayer) map.fitBounds(fullPathLayer.getBounds(), { padding:[50,50] });
+}
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function pad(n) { return n < 10 ? '0'+n : ''+n; }
+</script>
+</body>
+</html>
