@@ -43,6 +43,25 @@ PX4 Flight Log Viewer — ArduPilot bortidan olingan `.bin` formatidagi parvoz j
 | **RC Input** | Joystick kanallarini vizual ko'rsatish |
 | **RC Output** | Motor signal kuchini bar diagrammasi sifatida ko'rsatish |
 | **Status bar** | Masofa · Maksimal balandlik · Maksimal tezlik |
+| **Video eksport** | Parvozni 1920×1080 / 15 FPS MP4 videoga eksport qilish; video uzunligi = uchish vaqti |
+| **Til sozlamasi** | O'zbek / Ingliz tilida interfeys (UZ / EN) |
+
+### Video eksport
+
+`🎬 Video yaratish` tugmasini bosing. Alohida oyna ochiladi va build jarayoni background'da ishlaydi:
+
+1. **Build video** — xarita va telemetriya panellari kadr-kadr suratga olinadi
+2. **Progress bar** — quyi panelda jarayon ko'rsatiladi; asosiy ilova ishini davom ettiradi
+3. **Save video** — build tugagach, `.mp4` faylni istalgan joyga saqlang
+
+| Parametr | Qiymat |
+| -------- | ------ |
+| Formatrat | MP4 (H.264 konteyner) |
+| O'lcham | 1920 × 1080 (Full HD) |
+| FPS | 15 kadr/soniya |
+| Uzunlik | Uchish vaqtiga teng (real timestamp asosida) |
+
+> **Talab:** `opencv-python` va `numpy` paketlari (`requirements.txt` da mavjud).
 
 ### Windows tizimida ishga tushurish
 
@@ -146,6 +165,8 @@ PX4 Flight Log Viewer is a desktop application for interactively replaying ArduP
 | **RC Input** | Visual joystick channel bars |
 | **RC Output** | Motor PWM signal bars |
 | **Status bar** | Total distance · Max altitude · Max speed |
+| **Video export** | Export flight as 1920×1080 / 15 FPS MP4; video duration matches real flight time |
+| **Language** | Switch interface language between Uzbek and English (UZ / EN) |
 
 ### Running on Windows
 
